@@ -287,7 +287,7 @@ PROGRAM_VERSION="3.18.1"
 
 set -e -u
 
-PROGRAM_NAME="proot-distro"
+PROGRAM_NAME=$(basename "$(realpath "$0")")
 
 # Where distribution plug-ins are stored.
 DISTRO_PLUGINS_DIR="@TERMUX_PREFIX@/etc/proot-distro"
@@ -304,6 +304,9 @@ INSTALLED_ROOTFS_DIR="${RUNTIME_DIR}/installed-rootfs"
 # Default name servers.
 DEFAULT_PRIMARY_NAMESERVER="8.8.8.8"
 DEFAULT_SECONDARY_NAMESERVER="8.8.4.4"
+
+# PATH environment variable for distributions.
+DEFAULT_PATH_ENV="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/games:/usr/games:@TERMUX_PREFIX@/bin:/system/bin:/system/xbin"
 
 # Default fake kernel version.
 # Note: faking kernel version is required when using PRoot-Distro on
@@ -510,7 +513,7 @@ command_install() {
 		msg
 		msg "${BRED}Error: unknown distribution '${YELLOW}${distro_name}${BRED}' was requested to be installed.${RST}"
 		msg
-		msg "${CYAN}Run '${GREEN}${PROGRAM_NAME} list${CYAN}' to see the supported distributions.${RST}"
+		msg "${CYAN}View supported distributions by: ${GREEN}${PROGRAM_NAME} list${RST}"
 		msg
 		return 1
 	fi
@@ -668,34 +671,47 @@ command_install() {
 			-xf "${DOWNLOAD_CACHE_DIR}/${tarball_name}" --exclude='dev' |& grep -v "/linkerconfig/" >&2
 		set -e
 
-		# Write important environment variables to profile file as /bin/login does not
-		# preserve them.
-		local profile_script
-		if [ -d "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/profile.d" ]; then
-			profile_script="${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/profile.d/termux-proot.sh"
-		else
-			chmod u+rw "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/profile" >/dev/null 2>&1 || true
-			profile_script="${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/profile"
+		# If no /etc in rootfs, terminate installation.
+		# This usually indicates that downloaded distribution tarball doesn't contain
+		# actual rootfs, wrong tar strip option was specified or the distribution has
+		# high grade of customization and doesn't respect FHS standard.
+		if [ ! -e "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc" ]; then
+			msg
+			msg "${BRED}Error: the rootfs of distribution '${YELLOW}${distro_name}${BRED}' has unexpected structure (no /etc directory). Make sure that variable TARBALL_STRIP_OPT specified in distribution plug-in is correct.${RST}"
+			msg
+			return 1
 		fi
-		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Creating file '${profile_script}'...${RST}"
-		cat <<- EOF >> "$profile_script"
-		[ -z "\$LANG" ] && export LANG=C.UTF-8
-		export PATH=\${PATH}:@TERMUX_PREFIX@/bin:/system/bin:/system/xbin
-		export TERM=${TERM-xterm-256color}
-		export TMPDIR=/tmp
-		export PULSE_SERVER=127.0.0.1
-		export MOZ_FAKE_NO_SANDBOX=1
-		EOF
+
+		# Write important environment variables to /etc/environment.
+		chmod u+rw "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/environment" >/dev/null 2>&1 || true
+		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Writing file '${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/environment'...${RST}"
 		for var in ANDROID_ART_ROOT ANDROID_DATA ANDROID_I18N_ROOT ANDROID_ROOT \
 			ANDROID_RUNTIME_ROOT ANDROID_TZDATA_ROOT BOOTCLASSPATH COLORTERM \
 			DEX2OATBOOTCLASSPATH EXTERNAL_STORAGE; do
 			set +u
 			if [ -n "${!var}" ]; then
-				echo "export ${var}='${!var}'" >> "$profile_script"
+				echo "${var}=${!var}" >> "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/environment"
 			fi
 			set -u
 		done
 		unset var
+		cat <<- EOF >> "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/environment"
+		LANG=en_US.UTF-8
+		MOZ_FAKE_NO_SANDBOX=1
+		PATH=${DEFAULT_PATH_ENV}
+		PULSE_SERVER=127.0.0.1
+		TERM=${TERM-xterm-256color}
+		TMPDIR=/tmp
+		EOF
+
+		# Fix PATH in some configuration files.
+		for f in /etc/bash.bashrc /etc/profile /etc/login.defs; do
+			[ ! -e "${INSTALLED_ROOTFS_DIR}/${distro_name}${f}" ] && continue
+			msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Updating PATH in '${INSTALLED_ROOTFS_DIR}/${distro_name}${f}' if needed...${RST}"
+			sed -i -E "s@\<(PATH=)(\"?[^\"[:space:]]+(\"|\$|\>))@\1\"${DEFAULT_PATH_ENV}\"@g" \
+				"${INSTALLED_ROOTFS_DIR}/${distro_name}${f}"
+		done
+		unset f
 
 		# Default /etc/resolv.conf may be empty or unsuitable for use.
 		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Creating file '${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/resolv.conf'...${RST}"
@@ -758,7 +774,7 @@ command_install() {
 
 		msg "${BLUE}[${GREEN}*${BLUE}] ${CYAN}Finished.${RST}"
 		msg
-		msg "${CYAN}Now run '${GREEN}${PROGRAM_NAME} login $distro_name${CYAN}' to log in.${RST}"
+		msg "${CYAN}Log in with: ${GREEN}${PROGRAM_NAME} login ${distro_name}${CYAN}${RST}"
 		msg
 		return 0
 	else
@@ -1197,7 +1213,7 @@ command_remove() {
 		msg
 		msg "${BRED}Error: unknown distribution '${YELLOW}${distro_name}${BRED}' was requested to be removed.${RST}"
 		msg
-		msg "${CYAN}Run '${GREEN}${PROGRAM_NAME} list${CYAN}' to see the supported distributions.${RST}"
+		msg "${CYAN}View supported distributions by: ${GREEN}${PROGRAM_NAME} list${RST}"
 		msg
 		return 1
 	fi
@@ -1344,7 +1360,7 @@ command_rename() {
 		msg
 		msg "${BRED}Error: unknown distribution '${YELLOW}${orig_distro_name}${BRED}' was requested to be renamed.${RST}"
 		msg
-		msg "${CYAN}Run '${GREEN}${PROGRAM_NAME} list${CYAN}' to see the supported distributions.${RST}"
+		msg "${CYAN}View supported distributions by: ${GREEN}${PROGRAM_NAME} list${RST}"
 		msg
 		return 1
 	fi
@@ -1477,7 +1493,7 @@ command_reset() {
 		msg
 		msg "${BRED}Error: unknown distribution '${YELLOW}${distro_name}${BRED}' was requested to be reset.${RST}"
 		msg
-		msg "${CYAN}Run '${GREEN}${PROGRAM_NAME} list${CYAN}' to see the supported distributions.${RST}"
+		msg "${CYAN}View supported distributions by: ${GREEN}${PROGRAM_NAME} list${RST}"
 		msg
 		return 1
 	fi
@@ -1495,7 +1511,7 @@ command_reset() {
 
 command_reset_help() {
 	msg
-	msg "${BYELLOW}Usage: ${BCYAN}$PROGRAM_NAME ${GREEN}reset ${CYAN}[${GREEN}DISTRIBUTION ALIAS${CYAN}]${RST}"
+	msg "${BYELLOW}Usage: ${BCYAN}${PROGRAM_NAME} ${GREEN}reset ${CYAN}[${GREEN}DISTRIBUTION ALIAS${CYAN}]${RST}"
 	msg
 	msg "${CYAN}Reinstall the specified Linux distribution.${RST}"
 	msg
@@ -1663,7 +1679,7 @@ command_login() {
 		msg
 		msg "${BRED}Error: unknown distribution '${YELLOW}${distro_name}${BRED}' was requested for logging in.${RST}"
 		msg
-		msg "${CYAN}Run '${GREEN}${PROGRAM_NAME} list${CYAN}' to see the supported distributions.${RST}"
+		msg "${CYAN}View supported distributions by: ${GREEN}${PROGRAM_NAME} list${RST}"
 		msg
 		return 1
 	fi
@@ -1685,47 +1701,93 @@ command_login() {
 		export PROOT_L2S_DIR="${INSTALLED_ROOTFS_DIR}/${distro_name}/.l2s"
 	fi
 
-	if [ $# -ge 1 ]; then
-		# Wrap in quotes each argument to prevent word splitting.
-		local -a shell_command_args
-		for i in "$@"; do
-			shell_command_args+=("'$i'")
-		done
-
-		if stat "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/su" >/dev/null 2>&1; then
-			set -- "/bin/su" "-l" "$login_user" "-c" "${shell_command_args[*]}"
-		else
-			msg "${BRED}Warning: no /bin/su available in rootfs! You may need to install package 'util-linux' or 'shadow' (shadow-utils) or equivalent, depending on distribution.${RST}"
-			if [ -x "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/bash" ]; then
-				set -- "/bin/bash" "-l" "-c" "${shell_command_args[*]}"
-			else
-				set -- "/bin/sh" "-l" "-c" "${shell_command_args[*]}"
-			fi
-		fi
-	else
-		if stat "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/su" >/dev/null 2>&1; then
-			set -- "/bin/su" "-l" "$login_user"
-		else
-			msg "${BRED}Warning: no /bin/su available in rootfs! You may need to install package 'util-linux' or 'shadow' (shadow-utils) or equivalent, depending on distribution.${RST}"
-			if [ -x "${INSTALLED_ROOTFS_DIR}/${distro_name}/bin/bash" ]; then
-				set -- "/bin/bash" "-l"
-			else
-				set -- "/bin/sh" "-l"
-			fi
-		fi
+	# It's hard to work without /etc/passwd.
+	if [ ! -e "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" ]; then
+		msg "${BRED}Error: the selected distribution doesn't have /etc/passwd.${RST}"
+		return 1
 	fi
 
-	# Setup the default environment as well as copy some variables
-	# defined by Termux. Note that when copying variables, we don't
-	# care whether they actually defined in Termux or not. If they
-	# will be empty, this should not cause any issues.
+	# Catch invalid specified user before login command will be executed.
+	if ! grep -q "${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" >/dev/null 2>&1; then
+		msg "${BRED}Error: no user '${login_user}' defined in /etc/passwd of distribution.${RST}"
+		return 1
+	fi
+
+	local login_uid login_gid login_home login_shell
+	login_uid=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 3)
+	if [ -z "${login_uid}" ]; then
+		msg "${BRED}Error: failed to retrieve the id of user '${login_user}' from /etc/passwd of distribution.${RST}"
+		return 1
+	fi
+	login_gid=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 4)
+	if [ -z "${login_gid}" ]; then
+		msg "${BRED}Error: failed to retrieve the primary group id of user '${login_user}' from /etc/passwd of distribution.${RST}"
+		return 1
+	fi
+	login_home=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 6)
+	if [ -z "${login_home}" ]; then
+		msg "${BRED}Error: failed to retrieve the home of user '${login_user}' from /etc/passwd of distribution.${RST}"
+		return 1
+	fi
+	login_shell=$(grep "^${login_user}:" "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/passwd" | cut -d ':' -f 7)
+	if [ -z "${login_shell}" ]; then
+		msg "${BRED}Error: failed to retrieve the shell of user '${login_user}' from /etc/passwd of distribution.${RST}"
+		return 1
+	fi
+
+	local -a login_shell_args
+	if [ $# -ge 1 ]; then
+		# Wrap in quotes each argument to prevent word splitting.
+		local -a login_shell_args
+		for i in "$@"; do
+			login_shell_args+=("'$i'")
+		done
+		set -- "-c" "${login_shell_args[*]}"
+	else
+		set --
+	fi
+
+	local -a login_env_vars
+	login_env_vars=(
+		"PATH=${DEFAULT_PATH_ENV}"
+	)
+
+	for var in ANDROID_ART_ROOT ANDROID_DATA ANDROID_I18N_ROOT ANDROID_ROOT \
+		ANDROID_RUNTIME_ROOT ANDROID_TZDATA_ROOT BOOTCLASSPATH \
+		DEX2OATBOOTCLASSPATH EXTERNAL_STORAGE; do
+		set +u
+		if [ -n "${!var}" ]; then
+			login_env_vars+=("${var}=${!var}")
+		fi
+		set -u
+	done
+	unset var
+
+	# Handle /etc/environment.
+	if [ -e "${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/environment" ]; then
+		mapfile -t -O "${#login_env_vars[@]}" login_env_vars < <(
+			sed -E \
+				-e "s/^([^=]+=)['\"]/\1/g" \
+				-e "s/['\"]\$//g" \
+				-e "/^[^=]+\$/d" \
+				"${INSTALLED_ROOTFS_DIR}/${distro_name}/etc/environment"
+		)
+	fi
+
+	# Using '-i' to ensure that we can fully control which
+	# environment variables will be inherited by shell.
 	set -- "/usr/bin/env" "-i" \
-		"HOME=/root" \
-		"LANG=C.UTF-8" \
+		"${login_env_vars[@]}" \
+		"COLORTERM=${COLORTERM-}" \
+		"HOME=${login_home}" \
 		"TERM=${TERM-xterm-256color}" \
+		"${login_shell}" \
+		"-l" \
 		"$@"
 
 	set -- "--rootfs=${INSTALLED_ROOTFS_DIR}/${distro_name}" "$@"
+	set -- "--change-id=${login_uid}:${login_gid}" "$@"
+	set -- "--cwd=${login_home}" "$@"
 
 	# Setup QEMU when CPU architecture do not match the one of device.
 	local target_arch
@@ -1818,10 +1880,6 @@ command_login() {
 
 	# Fix lstat to prevent dpkg symlink size warnings
 	set -- "-L" "$@"
-
-	# Simulate root so we can switch users.
-	set -- "--cwd=/root" "$@"
-	set -- "--root-id" "$@"
 
 	# Core file systems that should always be present.
 	set -- "--bind=/dev" "$@"
@@ -1999,7 +2057,7 @@ command_login() {
 
 command_login_help() {
 	msg
-	msg "${BYELLOW}Usage: ${BCYAN}$PROGRAM_NAME ${GREEN}login ${CYAN}[${GREEN}OPTIONS${CYAN}] [${GREEN}DISTRO ALIAS${CYAN}] [${GREEN}-- ${CYAN}[${GREEN}COMMAND${CYAN}]]${RST}"
+	msg "${BYELLOW}Usage: ${BCYAN}${PROGRAM_NAME} ${GREEN}login ${CYAN}[${GREEN}OPTIONS${CYAN}] [${GREEN}DISTRO ALIAS${CYAN}] [${GREEN}-- ${CYAN}[${GREEN}COMMAND${CYAN}]]${RST}"
 	msg
 	msg "${CYAN}Launch a login shell for the specified distribution if no${RST}"
 	msg "${CYAN}additional arguments were given. Otherwise execute the${RST}"
@@ -2187,7 +2245,7 @@ command_backup() {
 		msg
 		msg "${BRED}Error: unknown distribution '${YELLOW}${distro_name}${BRED}' was requested for backup.${RST}"
 		msg
-		msg "${CYAN}Run '${GREEN}${PROGRAM_NAME} list${CYAN}' to see the supported distributions.${RST}"
+		msg "${CYAN}View supported distributions by: ${GREEN}${PROGRAM_NAME} list${RST}"
 		msg
 		return 1
 	fi
@@ -2285,7 +2343,7 @@ command_backup() {
 
 command_backup_help() {
 	msg
-	msg "${BYELLOW}Usage: ${BCYAN}$PROGRAM_NAME ${GREEN}backup ${CYAN}[${GREEN}DISTRIBUTION ALIAS${CYAN}]${RST}"
+	msg "${BYELLOW}Usage: ${BCYAN}${PROGRAM_NAME} ${GREEN}backup ${CYAN}[${GREEN}DISTRIBUTION ALIAS${CYAN}]${RST}"
 	msg
 	msg "${CYAN}Back up a specified distribution installation into tarball.${RST}"
 	msg
@@ -2651,7 +2709,7 @@ if [ $# -ge 1 ]; then
 			msg
 			msg "${BRED}Error: unknown command '${YELLOW}$1${BRED}'.${RST}"
 			msg
-			msg "${CYAN}Run '${GREEN}${PROGRAM_NAME} help${CYAN}' to see the list of available commands.${RST}"
+			msg "${CYAN}View supported commands by: ${GREEN}${PROGRAM_NAME} help${CYAN}${RST}"
 			msg
 			exit 1
 			;;
